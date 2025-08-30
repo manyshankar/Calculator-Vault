@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Calculator (Disguised Vault)</title>
+  <style>
+    :root {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;
+    }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: #bc872b;
+      margin: 0;
+      padding: 20px
+    }
+
+    .card {
+      width: 400px;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+      overflow: hidden
+    }
+
+    .display {
+      padding: 18px;
+      background: #111;
+      color: #fff;
+      font-size: 28px;
+      text-align: right
+    }
+
+    .pad {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      padding: 12px
+    }
+
+    button {
+      padding: 18px;
+      border-radius: 16px;
+      border: 0;
+      font-size: 18px;
+      background: #e6e7eb;
+      cursor: pointer
+    }
+
+    button.op {
+      background: #fbb000
+    }
+
+    button.equal {
+      background: #078ae1;
+      color: #fff;
+      grid-column: span 2
+    }
+
+    #vault {
+      display: none;
+      padding: 12px
+    }
+
+    .files {
+      max-height: 220px;
+      overflow: auto;
+      border: 1px dashed #ddd;
+      padding: 8px;
+      border-radius: 8px;
+      margin-bottom: 8px
+    }
+
+    .file-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px;
+      border-bottom: 1px solid #eee
+    }
+
+    .file-item:last-child {
+      border-bottom: none
+    }
+
+    .hidden-note {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 8px
+    }
+
+    input[type="file"] {
+      display: block;
+      margin-bottom: 8px
+    }
+
+    .small-btn {
+      padding: 6px 8px;
+      font-size: 13px;
+      border-radius: 6px
+    }
+
+    .danger {
+      background: #ef476f;
+      color: #fff
+    }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <div id="display" class="display">0</div>
+    <div class="pad" id="pad">
+      <button data-key="7">7</button>
+      <button data-key="8">8</button>
+      <button data-key="9">9</button>
+      <button class="op" data-key="/">÷</button>
+
+      <button data-key="4">4</button>
+      <button data-key="5">5</button>
+      <button data-key="6">6</button>
+      <button class="op" data-key="*">×</button>
+
+      <button data-key="1">1</button>
+      <button data-key="2">2</button>
+      <button data-key="3">3</button>
+      <button class="op" data-key="-">−</button>
+
+      <button data-key="0">0</button>
+      <button data-key=".">.</button>
+      <button class="equal" id="equals">=</button>
+      <button class="op" data-key="+">+</button>
+
+      <button data-key="C" style="grid-column:span 2">C</button>
+      <button data-key="DEL">DEL</button>
+
+    </div>
+
+    <!-- Vault UI (hidden) -->
+    <div id="vault">
+      <div class="hidden-note">Vault unlocked. Upload files to encrypt and store locally in this browser.</div>
+      <input type="file" id="fileInput" multiple />
+      <div style="display:flex;gap:8px;margin-bottom:8px;">
+        <button id="uploadBtn" class="small-btn">Encrypt & Store</button>
+        <button id="changePinBtn" class="small-btn">Change PIN</button>
+        <button id="lockBtn" class="small-btn danger">Lock Vault</button>
+      </div>
+      <div class="files" id="filesList">No files yet.</div>
+      <div style="font-size:12px;color:#666">Tip: Enter PIN on calculator then press '=' to open vault.</div>
+    </div>
+  </div>
+
+  <script>
+    /* ======= Simple IndexedDB wrapper ======= */
+    const DB_NAME = 'calc_vault_db';
+    const STORE = 'files';
+    function openDB() {
+      return new Promise((res, rej) => {
+        const r = indexedDB.open(DB_NAME, 1);
+        r.onupgradeneeded = e => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains(STORE)) {
+            db.createObjectStore(STORE, { keyPath: 'id' });
+          }
+        };
+        r.onsuccess = e => res(e.target.result);
+        r.onerror = e => rej(e.target.error);
+      });
+    }
+    async function dbPut(item) {
+      const db = await openDB();
+      return new Promise((res, rej) => {
+        const tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).put(item);
+        tx.oncomplete = () => res();
+        tx.onerror = e => rej(e.target.error);
+      });
+    }
+    async function dbGetAll() {
+      const db = await openDB();
+      return new Promise((res, rej) => {
+        const tx = db.transaction(STORE, 'readonly');
+        const req = tx.objectStore(STORE).getAll();
+        req.onsuccess = e => res(e.target.result);
+        req.onerror = e => rej(e.target.error);
+      });
+    }
+    async function dbDelete(id) {
+      const db = await openDB();
+      return new Promise((res, rej) => {
+        const tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).delete(id);
+        tx.oncomplete = () => res();
+        tx.onerror = e => rej(e.target.error);
+      });
+    }
+
+    /* ======= Crypto utilities (Web Crypto API) ======= */
+    function str2ab(str) { return new TextEncoder().encode(str); }
+    function ab2str(ab) { return new TextDecoder().decode(ab); }
+    async function deriveKeyFromPin(pin, salt, iterations = 200000) {
+      // salt: Uint8Array
+      const baseKey = await crypto.subtle.importKey('raw', str2ab(pin), { name: 'PBKDF2' }, false, ['deriveKey']);
+      const key = await crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
+        baseKey,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+      );
+      return key;
+    }
+    function randomBytes(len) { return crypto.getRandomValues(new Uint8Array(len)); }
+
+    async function encryptBuffer(key, buffer) {
+      const iv = randomBytes(12);
+      const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, buffer);
+      return { iv, ct };
+    }
+    async function decryptBuffer(key, iv, ct) {
+      return crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+    }
+
+    /* ======= App logic ======= */
+    let currentExpression = '';
+    const display = document.getElementById('display');
+    const pad = document.getElementById('pad');
+    const vault = document.getElementById('vault');
+    const filesList = document.getElementById('filesList');
+    const fileInput = document.getElementById('fileInput');
+
+    let lastPinAttempt = ''; // store entered pin expression when '=' pressed
+    let unlockedKey = null; // CryptoKey when unlocked
+    let unlockedPin = null;
+
+    function updateDisplay() {
+      display.textContent = currentExpression || '0';
+    }
+
+    pad.addEventListener('click', e => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      const k = btn.dataset.key;
+      if (k === undefined) {
+        // special buttons
+        if (btn.id === 'equals') return; // handled elsewhere
+        if (btn.id === 'open-settings') {
+          alert('Calculator disguise. To open vault: type PIN and press =.');
+          return;
+        }
+        return;
+      }
+      if (k === 'C') { currentExpression = ''; updateDisplay(); return; }
+      if (k === 'DEL') { currentExpression = currentExpression.slice(0, -1); updateDisplay(); return; }
+      // append
+      currentExpression += k;
+      updateDisplay();
+    });
+
+    // Evaluate / open vault
+    document.getElementById('equals').addEventListener('click', async () => {
+      const expr = currentExpression.trim();
+      if (!expr) { return; }
+      // Check: if expr is numeric PIN (only digits) => try open vault
+      if (/^\d{4,}$/.test(expr)) { // at least 4 digits recommended
+        lastPinAttempt = expr;
+        try {
+          await tryUnlockVault(expr);
+          currentExpression = '';
+          updateDisplay();
+          return;
+        } catch (err) {
+          // not unlocked, attempt as calculator evaluation
+          console.warn('vault unlock failed', err);
+        }
+      }
+      // fallback: evaluate as calculator expression
+      try {
+        // sanitize expression: allow digits, + - * / . parentheses
+        if (!/^[0-9+\-*/().\s]+$/.test(expr)) throw 'Invalid chars';
+        const result = Function('"use strict"; return (' + expr + ')')();
+        currentExpression = String(result);
+      } catch (e) {
+        currentExpression = 'Error';
+      }
+      updateDisplay();
+    });
+
+    /* ======= Vault functions ======= */
+    async function tryUnlockVault(pin) {
+      // We'll attempt to derive key from pin and try to decrypt one sample file metadata if exists.
+      const all = await dbGetAll();
+      if (all.length === 0) {
+        // no files yet => create key and salt for future use; allow unlock
+        const salt = randomBytes(16);
+        const key = await deriveKeyFromPin(pin, salt);
+        unlockedKey = key; unlockedPin = pin;
+        // store a marker entry with id '__meta' that records salt (not secret)
+        const meta = { id: '__meta', salt: Array.from(salt) };
+        await dbPut(meta);
+        showVault();
+        return;
+      }
+      // If meta exists, get salt from it, else try first file's salt
+      let meta = all.find(x => x.id === '__meta');
+      let saltArr = meta ? meta.salt : (all[0].salt || null);
+      if (!saltArr) throw 'No salt found';
+      const salt = new Uint8Array(saltArr);
+      const key = await deriveKeyFromPin(pin, salt);
+      // Attempt to decrypt first real file to validate
+      const test = all.find(x => x.id !== '__meta');
+      if (test) {
+        try {
+          const iv = new Uint8Array(test.iv);
+          const ct = test.data; // ArrayBuffer stored as structured clone; comes as ArrayBuffer / Uint8Array
+          // ensure ArrayBuffer
+          const ctBuf = ct instanceof ArrayBuffer ? ct : ct.buffer ? ct.buffer : ct;
+          await decryptBuffer(key, iv, ctBuf);
+          // success
+          unlockedKey = key; unlockedPin = pin;
+          showVault();
+        } catch (err) {
+          throw 'Invalid PIN';
+        }
+      } else {
+        // no files but meta exists; accept PIN if derived key matches? We'll accept.
+        unlockedKey = key; unlockedPin = pin;
+        showVault();
+      }
+    }
+
+    function showVault() {
+      vault.style.display = 'block';
+      loadFilesList();
+    }
+
+    /* File upload -> encrypt & store */
+    document.getElementById('uploadBtn').addEventListener('click', async () => {
+      const files = fileInput.files;
+      if (!files || files.length === 0) { alert('Koi file select kijiye'); return; }
+      if (!unlockedKey || !unlockedPin) { alert('Vault locked. Unlock first by entering PIN and ='); return; }
+      for (const f of files) {
+        const ab = await f.arrayBuffer();
+        const saltMeta = await getOrCreateMetaSalt(); // salt for key derivation (already created)
+        const key = unlockedKey; // already derived
+        const { iv, ct } = await encryptBuffer(key, ab);
+        // store file: id unique
+        const id = crypto.randomUUID();
+        // structured clone can store ArrayBuffer; we'll store as object
+        await dbPut({
+          id,
+          name: f.name,
+          type: f.type,
+          iv: Array.from(iv),
+          data: ct, // ArrayBuffer
+          added: Date.now(),
+          salt: Array.from(saltMeta)
+        });
+      }
+      fileInput.value = '';
+      await loadFilesList();
+      alert('Files encrypted and stored locally.');
+    });
+
+    async function getOrCreateMetaSalt() {
+      const all = await dbGetAll();
+      let meta = all.find(x => x.id === '__meta');
+      if (meta) return new Uint8Array(meta.salt);
+      const salt = randomBytes(16);
+      await dbPut({ id: '__meta', salt: Array.from(salt) });
+      return salt;
+    }
+
+    async function loadFilesList() {
+      const all = await dbGetAll();
+      const files = all.filter(x => x.id !== '__meta').sort((a, b) => b.added - a.added);
+      filesList.innerHTML = '';
+      if (files.length === 0) { filesList.textContent = 'No files yet.'; return; }
+      for (const item of files) {
+        const div = document.createElement('div'); div.className = 'file-item';
+        const left = document.createElement('div'); left.textContent = item.name;
+        const right = document.createElement('div');
+        const viewBtn = document.createElement('button'); viewBtn.className = 'small-btn'; viewBtn.textContent = 'View';
+        viewBtn.addEventListener('click', () => viewFile(item));
+        const dlBtn = document.createElement('button'); dlBtn.className = 'small-btn'; dlBtn.textContent = 'Download';
+        dlBtn.addEventListener('click', () => downloadFile(item));
+        const delBtn = document.createElement('button'); delBtn.className = 'small-btn danger'; delBtn.textContent = 'Delete';
+        delBtn.addEventListener('click', async () => {
+          if (confirm('Delete file permanently?')) { await dbDelete(item.id); loadFilesList(); }
+        });
+        right.appendChild(viewBtn); right.appendChild(dlBtn); right.appendChild(delBtn);
+        right.style.display = 'flex'; right.style.gap = '6px';
+        div.appendChild(left); div.appendChild(right);
+        filesList.appendChild(div);
+      }
+    }
+
+    async function decryptItem(item) {
+      if (!unlockedKey) throw 'Vault locked';
+      const iv = new Uint8Array(item.iv);
+      // ct might be ArrayBuffer or Uint8Array; get ArrayBuffer
+      const ct = item.data;
+      const ctBuf = ct instanceof ArrayBuffer ? ct : ct.buffer ? ct.buffer : ct;
+      const plainBuf = await decryptBuffer(unlockedKey, iv, ctBuf);
+      return { buffer: plainBuf, name: item.name, type: item.type };
+    }
+
+    async function viewFile(item) {
+      try {
+        const d = await decryptItem(item);
+        const blob = new Blob([d.buffer], { type: d.type || 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        // display based on type
+        if (d.type.startsWith('image/')) {
+          const w = window.open('', '_blank'); w.document.write('<img src="' + url + '" style="max-width:100%"/>');
+        } else if (d.type.startsWith('video/')) {
+          const w = window.open('', '_blank'); w.document.write('<video controls src="' + url + '" style="max-width:100%"></video>');
+        } else if (d.type.startsWith('audio/')) {
+          const w = window.open('', '_blank'); w.document.write('<audio controls src="' + url + '"></audio>');
+        } else if (d.type === 'application/pdf') {
+          window.open(url, '_blank');
+        } else {
+          // for other types, show hex preview or download suggestion
+          const w = window.open('', '_blank'); w.document.write('<p>File type not previewable. <a href="' + url + '" download="' + d.name + '">Download</a></p>');
+        }
+      } catch (e) {
+        alert('Decryption failed: ' + e);
+      }
+    }
+
+    async function downloadFile(item) {
+      try {
+        const d = await decryptItem(item);
+        const blob = new Blob([d.buffer], { type: d.type || 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = d.name;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        alert('Decryption failed: ' + e);
+      }
+    }
+
+    /* Lock / change PIN */
+    document.getElementById('lockBtn').addEventListener('click', () => {
+      unlockedKey = null; unlockedPin = null; vault.style.display = 'none'; alert('Vault locked.');
+    });
+
+    document.getElementById('changePinBtn').addEventListener('click', async () => {
+      if (!unlockedPin) { alert('Unlock first'); return; }
+      const newPin = prompt('Enter new PIN (min 4 digits):');
+      if (!newPin || !/^\d{4,}$/.test(newPin)) { alert('Invalid PIN'); return; }
+      // Re-encrypt all files with new salt/key
+      const all = await dbGetAll();
+      const files = all.filter(x => x.id !== '__meta');
+      if (files.length === 0) {
+        // just replace meta salt
+        const newSalt = randomBytes(16);
+        await dbPut({ id: '__meta', salt: Array.from(newSalt) });
+        unlockedKey = await deriveKeyFromPin(newPin, newSalt);
+        unlockedPin = newPin;
+        alert('PIN changed (no files).');
+        return;
+      }
+      if (!confirm('Changing PIN will re-encrypt all stored files. Continue?')) return;
+      // derive new key
+      const newSalt = randomBytes(16);
+      const newKey = await deriveKeyFromPin(newPin, newSalt);
+      // iterate files: decrypt with current unlockedKey, encrypt with newKey, store
+      for (const item of files) {
+        try {
+          const dec = await decryptItem(item);
+          const { iv, ct } = await encryptBuffer(newKey, dec.buffer);
+          // save: keep id same but update data, iv, salt
+          await dbPut({
+            id: item.id,
+            name: item.name,
+            type: item.type,
+            iv: Array.from(iv),
+            data: ct,
+            added: item.added,
+            salt: Array.from(newSalt)
+          });
+        } catch (e) {
+          console.error('re-encrypt failed for', item.id, e);
+        }
+      }
+      // update meta
+      await dbPut({ id: '__meta', salt: Array.from(newSalt) });
+      unlockedKey = newKey; unlockedPin = newPin;
+      await loadFilesList();
+      alert('PIN changed and files re-encrypted.');
+    });
+
+    /* initialize: load files if already unlocked (none) */
+    (async () => { updateDisplay(); const all = await dbGetAll(); if (all.length > 0) {/* nothing */ } })();
+
+  </script>
+</body>
+
+</html>
